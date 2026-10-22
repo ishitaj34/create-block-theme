@@ -175,6 +175,10 @@ class CBT_Theme_Templates {
 
 		$template = self::eliminate_environment_specific_content( $template, $options );
 
+		if ( ! array_key_exists( 'patternReferences', $options ) || $options['patternReferences'] ) {
+			$template = self::replace_unedited_theme_patterns( $template );
+		}
+
 		if ( array_key_exists( 'localizeText', $options ) && $options['localizeText'] ) {
 			$template = self::escape_text_in_template( $template );
 		}
@@ -385,5 +389,290 @@ class CBT_Theme_Templates {
 
 		$template->content = $parsed_content;
 		return $template;
+	}
+
+	/**
+	 * Replace unedited theme patterns in template content with pattern references.
+	 *
+	 * When a theme pattern is inserted in the editor, Gutenberg inlines its blocks
+	 * and sets metadata.patternName on the root block. If the content still matches
+	 * the registered pattern from the active theme, replace it with a wp:pattern reference.
+	 *
+	 * @param object $template The template to process.
+	 * @return object The template with unedited patterns converted to references.
+	 */
+	public static function replace_unedited_theme_patterns( $template ) {
+		if ( empty( $template->content ) ) {
+			return $template;
+		}
+
+		$blocks            = parse_blocks( $template->content );
+		$blocks            = self::process_blocks_for_pattern_references( $blocks );
+		$template->content = serialize_blocks( $blocks );
+
+		return $template;
+	}
+
+	/**
+	 * Recursively process blocks and replace unedited theme pattern blocks with pattern references.
+	 *
+	 * @param array $blocks Array of parsed blocks.
+	 * @return array Processed array of blocks.
+	 */
+	private static function process_blocks_for_pattern_references( array $blocks ) {
+		$processed = array();
+
+		foreach ( $blocks as $block ) {
+			$pattern_name = isset( $block['attrs']['metadata']['patternName'] ) ? $block['attrs']['metadata']['patternName'] : null;
+
+			if (
+				is_string( $pattern_name ) &&
+				self::is_active_theme_pattern( $pattern_name ) &&
+				self::is_block_matching_pattern( $block, $pattern_name )
+			) {
+				$processed[] = array(
+					'blockName'    => 'core/pattern',
+					'attrs'        => array( 'slug' => $pattern_name ),
+					'innerBlocks'  => array(),
+					'innerHTML'    => '',
+					'innerContent' => array(),
+				);
+			} else {
+				if ( ! empty( $block['innerBlocks'] ) ) {
+					$block['innerBlocks'] = self::process_blocks_for_pattern_references( $block['innerBlocks'] );
+				}
+				$processed[] = $block;
+			}
+		}
+
+		return $processed;
+	}
+
+	/**
+	 * Determine if a pattern name is registered by the active theme or its parent theme.
+	 *
+	 * @param string $pattern_name The pattern slug / name.
+	 * @return bool True if registered by the active theme or parent theme.
+	 */
+	public static function is_active_theme_pattern( $pattern_name ) {
+		if ( ! class_exists( 'WP_Block_Patterns_Registry' ) ) {
+			return false;
+		}
+
+		$registry = WP_Block_Patterns_Registry::get_instance();
+		if ( ! $registry->is_registered( $pattern_name ) ) {
+			return false;
+		}
+
+		$pattern = $registry->get_registered( $pattern_name );
+		$theme   = wp_get_theme();
+
+		// Check if pattern filePath belongs to active theme or parent theme.
+		if ( ! empty( $pattern['filePath'] ) ) {
+			$file_path      = wp_normalize_path( $pattern['filePath'] );
+			$stylesheet_dir = wp_normalize_path( get_stylesheet_directory() );
+			$template_dir   = wp_normalize_path( get_template_directory() );
+
+			if ( str_starts_with( $file_path, $stylesheet_dir ) || str_starts_with( $file_path, $template_dir ) ) {
+				return true;
+			}
+		}
+
+		// Check if the pattern slug matches the theme's text domain or stylesheet slug prefix.
+		$allowed_slug_prefixes = array();
+		$stylesheet            = $theme->get_stylesheet();
+		$text_domain           = $theme->get( 'TextDomain' );
+
+		if ( ! empty( $stylesheet ) ) {
+			$allowed_slug_prefixes[] = $stylesheet . '/';
+		}
+		if ( ! empty( $text_domain ) ) {
+			$allowed_slug_prefixes[] = $text_domain . '/';
+		}
+
+		$parent = $theme->parent();
+		if ( $parent ) {
+			$parent_stylesheet  = $parent->get_stylesheet();
+			$parent_text_domain = $parent->get( 'TextDomain' );
+			if ( ! empty( $parent_stylesheet ) ) {
+				$allowed_slug_prefixes[] = $parent_stylesheet . '/';
+			}
+			if ( ! empty( $parent_text_domain ) ) {
+				$allowed_slug_prefixes[] = $parent_text_domain . '/';
+			}
+		}
+
+		foreach ( array_unique( $allowed_slug_prefixes ) as $prefix ) {
+			if ( str_starts_with( $pattern_name, $prefix ) ) {
+				return true;
+			}
+		}
+
+		// Check theme block patterns directly.
+		if ( method_exists( $theme, 'get_block_patterns' ) ) {
+			$theme_patterns = $theme->get_block_patterns();
+			if ( is_array( $theme_patterns ) ) {
+				foreach ( $theme_patterns as $theme_pattern ) {
+					if ( isset( $theme_pattern['slug'] ) && $theme_pattern['slug'] === $pattern_name ) {
+						return true;
+					}
+				}
+			}
+		}
+
+		return false;
+	}
+
+	/**
+	 * Check if a block's content and structure matches the registered pattern definition.
+	 *
+	 * @param array  $block        The parsed block from the template.
+	 * @param string $pattern_name The pattern slug / name.
+	 * @return bool True if the block matches the pattern definition.
+	 */
+	public static function is_block_matching_pattern( array $block, $pattern_name ) {
+		$registry = WP_Block_Patterns_Registry::get_instance();
+		$pattern  = $registry->get_registered( $pattern_name );
+
+		if ( empty( $pattern['content'] ) ) {
+			return false;
+		}
+
+		$pattern_blocks = parse_blocks( $pattern['content'] );
+		// Filter out empty whitespace blocks.
+		$pattern_blocks = array_values(
+			array_filter(
+				$pattern_blocks,
+				function ( $b ) {
+					return ! empty( $b['blockName'] ) || '' !== trim( isset( $b['innerHTML'] ) ? $b['innerHTML'] : '' );
+				}
+			)
+		);
+
+		// Gutenberg assigns patternName only to single root blocks.
+		if ( 1 !== count( $pattern_blocks ) ) {
+			return false;
+		}
+
+		$pattern_root = $pattern_blocks[0];
+
+		// Pass pattern_root through eliminate_environment_specific_content_from_block to normalize.
+		$pattern_root = self::eliminate_environment_specific_content_from_block( $pattern_root );
+
+		// Normalize candidate block attributes by removing injected pattern metadata.
+		$candidate_block = $block;
+		if ( isset( $candidate_block['attrs']['metadata']['patternName'] ) ) {
+			unset( $candidate_block['attrs']['metadata']['patternName'] );
+		}
+
+		// If Gutenberg injected metadata.name matching pattern title/name, and pattern_root didn't have it, remove it.
+		if (
+			isset( $candidate_block['attrs']['metadata']['name'] ) &&
+			! isset( $pattern_root['attrs']['metadata']['name'] ) &&
+			(
+				( isset( $pattern['title'] ) && $candidate_block['attrs']['metadata']['name'] === $pattern['title'] ) ||
+				( isset( $pattern['name'] ) && $candidate_block['attrs']['metadata']['name'] === $pattern['name'] )
+			)
+		) {
+			unset( $candidate_block['attrs']['metadata']['name'] );
+		}
+
+		if ( isset( $candidate_block['attrs']['metadata'] ) && empty( $candidate_block['attrs']['metadata'] ) ) {
+			unset( $candidate_block['attrs']['metadata'] );
+		}
+
+		return self::are_blocks_equivalent( $candidate_block, $pattern_root );
+	}
+
+	/**
+	 * Check if two blocks are equivalent in name, attributes, inner HTML, and inner blocks.
+	 *
+	 * @param array $block_a First block.
+	 * @param array $block_b Second block.
+	 * @return bool True if blocks are structurally and visually equivalent.
+	 */
+	public static function are_blocks_equivalent( array $block_a, array $block_b ) {
+		$name_a = isset( $block_a['blockName'] ) ? $block_a['blockName'] : '';
+		$name_b = isset( $block_b['blockName'] ) ? $block_b['blockName'] : '';
+		if ( $name_a !== $name_b ) {
+			return false;
+		}
+
+		$attrs_a = self::normalize_block_attributes( isset( $block_a['attrs'] ) ? $block_a['attrs'] : array() );
+		$attrs_b = self::normalize_block_attributes( isset( $block_b['attrs'] ) ? $block_b['attrs'] : array() );
+		if ( $attrs_a !== $attrs_b ) {
+			return false;
+		}
+
+		$html_a = self::normalize_html_content( isset( $block_a['innerHTML'] ) ? $block_a['innerHTML'] : '' );
+		$html_b = self::normalize_html_content( isset( $block_b['innerHTML'] ) ? $block_b['innerHTML'] : '' );
+		if ( $html_a !== $html_b ) {
+			return false;
+		}
+
+		$inner_a = array_values(
+			array_filter(
+				isset( $block_a['innerBlocks'] ) ? $block_a['innerBlocks'] : array(),
+				function ( $b ) {
+					return ! empty( $b['blockName'] ) || '' !== trim( isset( $b['innerHTML'] ) ? $b['innerHTML'] : '' );
+				}
+			)
+		);
+		$inner_b = array_values(
+			array_filter(
+				isset( $block_b['innerBlocks'] ) ? $block_b['innerBlocks'] : array(),
+				function ( $b ) {
+					return ! empty( $b['blockName'] ) || '' !== trim( isset( $b['innerHTML'] ) ? $b['innerHTML'] : '' );
+				}
+			)
+		);
+
+		if ( count( $inner_a ) !== count( $inner_b ) ) {
+			return false;
+		}
+
+		$count = count( $inner_a );
+		for ( $i = 0; $i < $count; $i++ ) {
+			if ( ! self::are_blocks_equivalent( $inner_a[ $i ], $inner_b[ $i ] ) ) {
+				return false;
+			}
+		}
+
+		return true;
+	}
+
+	/**
+	 * Recursively normalize block attributes for comparison (e.g. key sorting).
+	 *
+	 * @param mixed $attrs Attributes array or value.
+	 * @return mixed Normalized attributes.
+	 */
+	private static function normalize_block_attributes( $attrs ) {
+		if ( ! is_array( $attrs ) ) {
+			return $attrs;
+		}
+
+		ksort( $attrs );
+		foreach ( $attrs as $k => $v ) {
+			if ( is_array( $v ) ) {
+				$attrs[ $k ] = self::normalize_block_attributes( $v );
+			}
+		}
+
+		return $attrs;
+	}
+
+	/**
+	 * Normalize HTML content by collapsing whitespace sequences.
+	 *
+	 * @param string $html HTML string.
+	 * @return string Normalized HTML string.
+	 */
+	private static function normalize_html_content( $html ) {
+		if ( ! is_string( $html ) ) {
+			return '';
+		}
+
+		return trim( preg_replace( '/\s+/', ' ', $html ) );
 	}
 }

@@ -415,4 +415,129 @@ class Test_Create_Block_Theme_Templates extends WP_UnitTestCase {
 		$new_template      = CBT_Theme_Media::make_template_images_local( $template );
 		$this->assertStringContainsString( '<?php echo esc_url( get_template_directory_uri() ); ?>/assets/images/pattern.webp', $new_template->content );
 	}
+
+	public function test_unedited_theme_pattern_is_replaced_with_pattern_reference() {
+		$theme_slug      = wp_get_theme()->get_stylesheet();
+		$pattern_slug    = $theme_slug . '/test-hero';
+		$pattern_content = '<!-- wp:group {"layout":{"type":"constrained"}} --><div class="wp-block-group"><!-- wp:heading --><h2>Hero Title</h2><!-- /wp:heading --></div><!-- /wp:group -->';
+
+		register_block_pattern(
+			$pattern_slug,
+			array(
+				'title'   => 'Test Hero',
+				'content' => $pattern_content,
+			)
+		);
+
+		$template          = new stdClass();
+		$template->slug    = 'home';
+		$template->content = '<!-- wp:group {"metadata":{"patternName":"' . $pattern_slug . '","name":"Test Hero"},"layout":{"type":"constrained"}} --><div class="wp-block-group"><!-- wp:heading --><h2>Hero Title</h2><!-- /wp:heading --></div><!-- /wp:group -->';
+
+		$new_template = CBT_Theme_Templates::prepare_template_for_export( $template );
+
+		unregister_block_pattern( $pattern_slug );
+
+		$this->assertStringContainsString( '<!-- wp:pattern {"slug":"' . $pattern_slug . '"} /-->', $new_template->content );
+		$this->assertStringNotContainsString( '<h2>Hero Title</h2>', $new_template->content );
+	}
+
+	public function test_edited_theme_pattern_is_kept_inline() {
+		$theme_slug      = wp_get_theme()->get_stylesheet();
+		$pattern_slug    = $theme_slug . '/test-hero-edited';
+		$pattern_content = '<!-- wp:group {"layout":{"type":"constrained"}} --><div class="wp-block-group"><!-- wp:heading --><h2>Original Title</h2><!-- /wp:heading --></div><!-- /wp:group -->';
+
+		register_block_pattern(
+			$pattern_slug,
+			array(
+				'title'   => 'Test Hero Edited',
+				'content' => $pattern_content,
+			)
+		);
+
+		$template          = new stdClass();
+		$template->slug    = 'home';
+		$template->content = '<!-- wp:group {"metadata":{"patternName":"' . $pattern_slug . '"},"layout":{"type":"constrained"}} --><div class="wp-block-group"><!-- wp:heading --><h2>Modified Title</h2><!-- /wp:heading --></div><!-- /wp:group -->';
+
+		$new_template = CBT_Theme_Templates::prepare_template_for_export( $template );
+
+		unregister_block_pattern( $pattern_slug );
+
+		$this->assertStringNotContainsString( '<!-- wp:pattern {"slug":"' . $pattern_slug . '"} /-->', $new_template->content );
+		$this->assertStringContainsString( '<h2>Modified Title</h2>', $new_template->content );
+	}
+
+	public function test_unedited_nested_pattern_is_replaced() {
+		$theme_slug      = wp_get_theme()->get_stylesheet();
+		$pattern_slug    = $theme_slug . '/nested-pattern';
+		$pattern_content = '<!-- wp:group --><div class="wp-block-group"><!-- wp:paragraph --><p>Nested Text</p><!-- /wp:paragraph --></div><!-- /wp:group -->';
+
+		register_block_pattern(
+			$pattern_slug,
+			array(
+				'title'   => 'Nested Pattern',
+				'content' => $pattern_content,
+			)
+		);
+
+		$template          = new stdClass();
+		$template->slug    = 'page';
+		$template->content = '<!-- wp:group {"align":"full"} --><div class="wp-block-group alignfull"><!-- wp:group {"metadata":{"patternName":"' . $pattern_slug . '"}} --><div class="wp-block-group"><!-- wp:paragraph --><p>Nested Text</p><!-- /wp:paragraph --></div><!-- /wp:group --></div><!-- /wp:group -->';
+
+		$new_template = CBT_Theme_Templates::prepare_template_for_export( $template );
+
+		unregister_block_pattern( $pattern_slug );
+
+		$this->assertStringContainsString( '<!-- wp:pattern {"slug":"' . $pattern_slug . '"} /-->', $new_template->content );
+		$this->assertStringContainsString( 'wp:group {"align":"full"}', $new_template->content );
+		$this->assertStringNotContainsString( '<p>Nested Text</p>', $new_template->content );
+	}
+
+	public function test_external_pattern_is_not_replaced() {
+		$pattern_slug    = 'external-plugin/some-pattern';
+		$pattern_content = '<!-- wp:group --><div class="wp-block-group"><!-- wp:paragraph --><p>External Content</p><!-- /wp:paragraph --></div><!-- /wp:group -->';
+
+		register_block_pattern(
+			$pattern_slug,
+			array(
+				'title'   => 'External Pattern',
+				'content' => $pattern_content,
+			)
+		);
+
+		$template          = new stdClass();
+		$template->slug    = 'home';
+		$template->content = '<!-- wp:group {"metadata":{"patternName":"' . $pattern_slug . '"}} --><div class="wp-block-group"><!-- wp:paragraph --><p>External Content</p><!-- /wp:paragraph --></div><!-- /wp:group -->';
+
+		$new_template = CBT_Theme_Templates::prepare_template_for_export( $template );
+
+		unregister_block_pattern( $pattern_slug );
+
+		$this->assertStringNotContainsString( '<!-- wp:pattern {"slug":"' . $pattern_slug . '"} /-->', $new_template->content );
+		$this->assertStringContainsString( '<p>External Content</p>', $new_template->content );
+	}
+
+	public function test_pattern_references_disabled_via_options() {
+		$theme_slug      = wp_get_theme()->get_stylesheet();
+		$pattern_slug    = $theme_slug . '/disabled-option-pattern';
+		$pattern_content = '<!-- wp:group --><div class="wp-block-group"><!-- wp:paragraph --><p>Content</p><!-- /wp:paragraph --></div><!-- /wp:group -->';
+
+		register_block_pattern(
+			$pattern_slug,
+			array(
+				'title'   => 'Disabled Option Pattern',
+				'content' => $pattern_content,
+			)
+		);
+
+		$template          = new stdClass();
+		$template->slug    = 'home';
+		$template->content = '<!-- wp:group {"metadata":{"patternName":"' . $pattern_slug . '"}} --><div class="wp-block-group"><!-- wp:paragraph --><p>Content</p><!-- /wp:paragraph --></div><!-- /wp:group -->';
+
+		$new_template = CBT_Theme_Templates::prepare_template_for_export( $template, null, array( 'patternReferences' => false ) );
+
+		unregister_block_pattern( $pattern_slug );
+
+		$this->assertStringNotContainsString( '<!-- wp:pattern {"slug":"' . $pattern_slug . '"} /-->', $new_template->content );
+		$this->assertStringContainsString( '<p>Content</p>', $new_template->content );
+	}
 }
